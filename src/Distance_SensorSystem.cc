@@ -21,9 +21,11 @@ void Distance_SensorSystem::Configure(
     gz::sim::EntityComponentManager &_ecm,
     gz::sim::EventManager & /* _eventManager */) {
   if (!_sdf->HasElement("vehicle_name") || !_sdf->HasElement("target_name") ||
-      !_sdf->HasElement("distance_threshold")) {
+      !_sdf->HasElement("distance_threshold") ||
+      !_sdf->HasElement("gz_publish_topic")) {
     gzerr << "[Distance_SensorSystem] Required SDF elements are "
-          << "<vehicle_name>, <target_name>, and <distance_threshold>.\n";
+          << "<vehicle_name>, <target_name>, <distance_threshold>, and "
+          << "<gz_publish_topic>.\n";
     return;
   }
 
@@ -32,8 +34,8 @@ void Distance_SensorSystem::Configure(
   this->distanceThreshold = _sdf->Get<double>("distance_threshold");
   this->minimumTimeWithinThreshold =
       _sdf->Get<double>("minimum_time_within_threshold", 0.0).first;
-  const std::string outputTopic =
-      _sdf->Get<std::string>("output_topic", "").first;
+  const std::string publishTopic =
+      _sdf->Get<std::string>("gz_publish_topic");
 
   if (this->vehicleName.empty() || this->targetName.empty() ||
       this->distanceThreshold < 0.0 || this->minimumTimeWithinThreshold < 0.0) {
@@ -47,32 +49,8 @@ void Distance_SensorSystem::Configure(
     return;
   }
 
-  if (outputTopic.empty()) {
-    gzmsg << "[Distance_SensorSystem] <output_topic> is empty; distance "
-          << "trigger is disabled.\n";
-    return;
-  }
-
-  if (_sdf->HasElement("below_threshold_message")) {
-    this->belowThresholdMessage =
-        _sdf->Get<std::string>("below_threshold_message");
-  } else if (_sdf->HasElement("gz_topic_output_if_below_threshold")) {
-    this->belowThresholdMessage =
-        _sdf->Get<std::string>("gz_topic_output_if_below_threshold");
-  } else {
-    gzerr << "[Distance_SensorSystem] Missing "
-          << "<below_threshold_message>.\n";
-    return;
-  }
-  if (_sdf->HasElement("above_threshold_message")) {
-    this->aboveThresholdMessage =
-        _sdf->Get<std::string>("above_threshold_message");
-  } else if (_sdf->HasElement("gz_topic_output_if_above_threshold")) {
-    this->aboveThresholdMessage =
-        _sdf->Get<std::string>("gz_topic_output_if_above_threshold");
-  } else {
-    gzerr << "[Distance_SensorSystem] Missing "
-          << "<above_threshold_message>.\n";
+  if (publishTopic.empty()) {
+    gzerr << "[Distance_SensorSystem] <gz_publish_topic> must not be empty.\n";
     return;
   }
 
@@ -88,40 +66,11 @@ void Distance_SensorSystem::Configure(
                                offset("vehicle_offset_y", "magnet_positiony"),
                                offset("vehicle_offset_z", "magnet_positionz"));
 
-  this->publisher = this->node.Advertise<gz::msgs::StringMsg>(outputTopic);
+  this->publisher = this->node.Advertise<gz::msgs::StringMsg>(publishTopic);
   if (!this->publisher) {
-    gzerr << "[Distance_SensorSystem] Failed to advertise [" << outputTopic
+    gzerr << "[Distance_SensorSystem] Failed to advertise [" << publishTopic
           << "].\n";
     return;
-  }
-
-  const std::string subscribeTopic =
-      _sdf->Get<std::string>("gz_subscribe_topic", "").first;
-  if (subscribeTopic.empty()) {
-    this->isActivated = true;
-  } else {
-    if (!_sdf->HasElement("trigger_condition")) {
-      gzerr << "[Distance_SensorSystem] <trigger_condition> is required when "
-            << "<gz_subscribe_topic> is not empty.\n";
-      return;
-    }
-
-    this->triggerCondition = _sdf->Get<std::string>("trigger_condition");
-    if (this->triggerCondition.empty()) {
-      gzerr << "[Distance_SensorSystem] <trigger_condition> must not be "
-            << "empty.\n";
-      return;
-    }
-
-    if (!this->node.Subscribe(subscribeTopic,
-                              &Distance_SensorSystem::OnTriggerMessage, this)) {
-      gzerr << "[Distance_SensorSystem] Failed to subscribe to ["
-            << subscribeTopic << "].\n";
-      return;
-    }
-
-    gzmsg << "[Distance_SensorSystem] Waiting for [" << this->triggerCondition
-          << "] on [" << subscribeTopic << "] before activating.\n";
   }
 
   this->vehicleEntity =
@@ -136,18 +85,13 @@ void Distance_SensorSystem::Configure(
         << "] relative to target [" << this->targetName << "] with threshold "
         << this->distanceThreshold << " m and minimum dwell "
         << this->minimumTimeWithinThreshold << " s; publishing on ["
-        << outputTopic << "].\n";
+        << publishTopic << "].\n";
 }
 
 void Distance_SensorSystem::PostUpdate(
     const gz::sim::UpdateInfo &_info,
     const gz::sim::EntityComponentManager &_ecm) {
   if (_info.paused || !this->configured) {
-    return;
-  }
-
-  const std::lock_guard<std::mutex> lock(this->activationMutex);
-  if (!this->isActivated || this->belowThresholdPublished) {
     return;
   }
 
@@ -190,7 +134,9 @@ void Distance_SensorSystem::PostUpdate(
   const bool belowThreshold = distance < this->distanceThreshold;
 
   if (belowThreshold) {
-    this->aboveThresholdPublished = false;
+    if (this->detectionPublished) {
+      return;
+    }
     if (!this->belowThresholdSince.has_value() ||
         _info.simTime < *this->belowThresholdSince) {
       this->belowThresholdSince = _info.simTime;
@@ -205,44 +151,20 @@ void Distance_SensorSystem::PostUpdate(
     }
   } else {
     this->belowThresholdSince.reset();
-    if (this->aboveThresholdPublished) {
-      return;
-    }
-  }
-
-  gz::msgs::StringMsg message;
-  message.set_data(belowThreshold ? this->belowThresholdMessage
-                                  : this->aboveThresholdMessage);
-  if (!this->publisher.Publish(message)) {
-    gzerr << "[Distance_SensorSystem] Failed to publish threshold state.\n";
+    this->detectionPublished = false;
     return;
   }
 
-  if (belowThreshold) {
-    this->belowThresholdPublished = true;
-  } else {
-    this->aboveThresholdPublished = true;
+  gz::msgs::StringMsg message;
+  message.set_data("activate");
+  if (!this->publisher.Publish(message)) {
+    gzerr << "[Distance_SensorSystem] Failed to publish proximity detection.\n";
+    return;
   }
-  gzmsg << "[Distance_SensorSystem] Distance " << distance << " m is "
-        << (belowThreshold ? "below" : "at or above")
-        << " threshold; published [" << message.data() << "].\n";
-}
 
-void Distance_SensorSystem::OnTriggerMessage(
-    const gz::msgs::StringMsg &_message) {
-  const std::lock_guard<std::mutex> lock(this->activationMutex);
-  const bool activate = _message.data() == this->triggerCondition;
-
-  if (activate && !this->isActivated) {
-    this->belowThresholdPublished = false;
-    this->aboveThresholdPublished = false;
-    this->belowThresholdSince.reset();
-  } else if (!activate) {
-    this->belowThresholdPublished = false;
-    this->aboveThresholdPublished = false;
-    this->belowThresholdSince.reset();
-  }
-  this->isActivated = activate;
+  this->detectionPublished = true;
+  gzmsg << "[Distance_SensorSystem] Distance " << distance
+        << " m is below threshold; published [" << message.data() << "].\n";
 }
 
 } // namespace Distance_Sensor

@@ -3,7 +3,6 @@
 
 #include <chrono>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 
@@ -34,8 +33,6 @@ public:
                   const gz::sim::EntityComponentManager &_ecm) override;
 
 private:
-  void OnTriggerMessage(const gz::msgs::StringMsg &_message);
-
   gz::sim::Entity vehicleEntity{gz::sim::kNullEntity};
   gz::sim::Entity targetEntity{gz::sim::kNullEntity};
   gz::transport::Node node;
@@ -43,9 +40,6 @@ private:
 
   std::string vehicleName;
   std::string targetName;
-  std::string belowThresholdMessage;
-  std::string aboveThresholdMessage;
-  std::string triggerCondition;
   gz::math::Vector3d vehicleLocalOffset{0.0, 0.0, 0.0};
   double distanceThreshold{0.0};
   double minimumTimeWithinThreshold{0.0};
@@ -53,11 +47,8 @@ private:
   bool configured{false};
   bool warnedMissingVehicle{false};
   bool warnedMissingTarget{false};
-  bool isActivated{false};
-  bool belowThresholdPublished{false};
-  bool aboveThresholdPublished{false};
+  bool detectionPublished{false};
   std::optional<std::chrono::steady_clock::duration> belowThresholdSince;
-  std::mutex activationMutex;
 };
 
 } // namespace Distance_Sensor
