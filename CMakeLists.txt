@@ -62,6 +62,8 @@ ament_export_dependencies(
 )
 # Make libDistance_SensorSystem.so discoverable by Gazebo after sourcing the
 # workspace installation.
+set(AMENT_CMAKE_ENVIRONMENT_HOOKS_DESC_distance_sensor_plugin
+  "prepend-non-duplicate;GZ_SIM_SYSTEM_PLUGIN_PATH;lib")
 ament_environment_hooks(
   "${CMAKE_CURRENT_SOURCE_DIR}/env_hooks/distance_sensor_plugin.sh.in"
 )
